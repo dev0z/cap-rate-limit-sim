@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html { background: #09090b; color-scheme: dark; }
+
+/* Particles move by --dx/--dy set inline; px equals one SVG user unit here. */
+@keyframes req-in     { 0% { transform: translate(0, 0); opacity: 0 } 15% { opacity: 1 } 85% { opacity: 1 } 100% { transform: translate(var(--dx), var(--dy)); opacity: 0 } }
+@keyframes req-bounce { 0% { transform: translate(0, 0); opacity: 0 } 15% { opacity: 1 } 55% { transform: translate(var(--dx), var(--dy)); opacity: 1 } 100% { transform: translate(calc(var(--dx) * 0.55), calc(var(--dy) * 0.55)); opacity: 0 } }
+@keyframes rtt        { 0% { transform: translate(0, 0); opacity: 0 } 10% { opacity: 1 } 50% { transform: translate(var(--dx), var(--dy)) } 90% { opacity: 1 } 100% { transform: translate(0, 0); opacity: 0 } }
+@keyframes gossip     { 0% { transform: translate(0, 0) scale(0.6); opacity: 0 } 15% { opacity: 1; transform: translate(calc(var(--dx) * 0.15), calc(var(--dy) * 0.15)) scale(1) } 100% { transform: translate(var(--dx), var(--dy)) scale(0.8); opacity: 0 } }
+@keyframes edge-flash { 0% { stroke-opacity: 0.9 } 100% { stroke-opacity: 0 } }
+@keyframes led-blink  { 0%, 100% { opacity: 1 } 50% { opacity: 0.2 } }
+@keyframes pop        { 0% { transform: scale(1) } 40% { transform: scale(1.08) } 100% { transform: scale(1) } }
+@keyframes float-up   { 0% { transform: translateY(0); opacity: 1 } 100% { transform: translateY(-30px); opacity: 0 } }
+@keyframes store-ping { 0% { box-shadow: 0 0 0 0 var(--accent) } 100% { box-shadow: 0 0 0 22px transparent } }
+
+.led-blink { animation: led-blink 900ms ease-in-out infinite; }
+.particle { will-change: transform, opacity; }
+input[type="range"] { height: 4px; cursor: pointer; }
+
+@media (prefers-reduced-motion: reduce) {
+  .particle, .led-blink { animation: none !important; }
+}
