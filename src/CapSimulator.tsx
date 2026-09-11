@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import {
-  Activity, ChevronLeft, ChevronRight, Clock, Database, Flame, Gauge, Globe, GraduationCap, Link2, Pause, Play,
+  Activity, ChevronLeft, ChevronRight, Clock, Database, Flame, Gauge, Globe, GraduationCap, Info, Link2, Pause, Play,
   Radio, RotateCcw, Scale, Scissors, Server, ShieldCheck, Ticket, TriangleAlert, Unplug, Waves, X, Zap,
 } from 'lucide-react';
 
@@ -12,6 +12,8 @@ export const TICK_MS = 200;
 export const WINDOW_TICKS = 5;
 export const LIMIT = 1000;
 export const HISTORY = 150;
+export const TICKET_RATE_SCALE = 0.1;  // ticket sale: buyers/s per site = slider / 10, so a drop lasts seconds, not ticks
+export const DROP_HOLD_TICKS = 25;     // pause after a sold-out drop before the next one starts
 
 export const NODES = [
   { code: 'IAD', city: 'Virginia', rttMs: 15 },
@@ -43,9 +45,12 @@ export interface MetricsSample {
   tick: number; incoming: number; admitted: number; rejected: number; failed: number;
   offeredWindow: number; truthWindow: number; storeWindow: number; overshoot: number;
   availability: number; latencyMs: number; debt: number; under: number;
-  nodes: NodeSample[]; cut?: number; healed?: number; burstStart?: number;
+  nodes: NodeSample[]; cut?: number; healed?: number; burstStart?: number; dropStart?: boolean;
 }
 export interface PartitionReport { node: number; durationTicks: number; excess: number; failed: number }
+// One ticket-sale run: 1000 seats offered, sold until every site stops selling.
+export interface DropRecord { n: number; mode: Mode; gossipMs: number; cut: number[]; sold: number; failed: number; durationTicks: number; latencyMs: number }
+export interface DropState { n: number; startTick: number; closedAt: number | null; failed: number; latencySum: number; answered: number }
 export interface TickEvents { synced: number[]; cpRoundTrips: number[]; burstStartedOn: number | null; healed: PartitionReport | null }
 export interface SimState {
   tick: number; seed: number; rngTraffic: number; rngLatency: number;
@@ -56,6 +61,7 @@ export interface SimState {
   partitionSince: (number | null)[]; debtAtCut: number[]; failedAtCut: number[]; nodeFailed: number[];
   cum: { incoming: number; admitted: number; ideal: number; failed: number };
   ledger: { admitted: number; ideal: number };   // cum snapshot at the last mode switch; debt is per mode
+  drop: DropState; drops: DropRecord[];          // ticket sale only; inert for the rate limiter
   history: MetricsSample[]; events: TickEvents; lastReport: PartitionReport | null;
 }
 
@@ -144,16 +150,29 @@ export function createSim(config: SimConfig, seed: number): SimState {
     burst: null, lastBurstEnd: -40,
     partitionSince: new Array<number | null>(N).fill(null), debtAtCut: zeros(), failedAtCut: zeros(), nodeFailed: zeros(),
     cum: { incoming: 0, admitted: 0, ideal: 0, failed: 0 }, ledger: { admitted: 0, ideal: 0 },
+    drop: { n: 1, startTick: 1, closedAt: null, failed: 0, latencySum: 0, answered: 0 }, drops: [],
     history: [], events: { synced: [], cpRoundTrips: zeros(), burstStartedOn: null, healed: null }, lastReport: null,
   };
 }
 
-export function stepSim(prev: SimState, config: SimConfig): SimState {
-  if (config.windowTicks !== prev.windowTicks) return stepSim(createSim(config, prev.seed), config);
-  const t = prev.tick + 1;
+// Clears every counter for a fresh ticket drop; history, ledgers and partitions carry on.
+function newDrop(s: SimState, startTick: number): SimState {
+  const len = s.nodes[0].ring.length;
+  return {
+    ...s, hub: new Array<Report | null>(N).fill(null), idealRing: new Array<number>(len).fill(0), idealTotal: 0, burst: null,
+    nodes: s.nodes.map(() => ({ ring: new Array<number>(len).fill(0), total: 0, known: new Array<Report | null>(N).fill(null), lastPullTick: -1 })),
+    drop: { n: s.drop.n + 1, startTick, closedAt: null, failed: 0, latencySum: 0, answered: 0 },
+  };
+}
+export const restartDrop = (s: SimState): SimState => newDrop(s, s.tick + 1);
+
+export function stepSim(prev0: SimState, config: SimConfig): SimState {
+  if (config.windowTicks !== prev0.windowTicks) return stepSim(createSim(config, prev0.seed), config);
+  const t = prev0.tick + 1;
   const { limit: L, windowTicks: W } = config;
   const finite = Number.isFinite(W);
   const slot = finite ? t % W : 0;
+  const prev = !finite && prev0.drop.closedAt !== null && t - prev0.drop.closedAt >= DROP_HOLD_TICKS ? newDrop(prev0, t) : prev0;
   let rt = prev.rngTraffic, rl = prev.rngLatency;
   const rndT = () => { const [u, s] = rand(rt); rt = s; return u; };
   const rndL = () => { const [u, s] = rand(rl); rl = s; return u; };
@@ -168,7 +187,8 @@ export function stepSim(prev: SimState, config: SimConfig): SimState {
 
   // 2. Arrivals.
   const w = weights(t, config.skew);
-  const incoming = w.map((wi, i) => poisson(config.ratePerNode * wi * burstMult(burst, i, t) * (TICK_MS / 1000), rndT));
+  const rate = config.ratePerNode * (finite ? 1 : TICKET_RATE_SCALE);
+  const incoming = w.map((wi, i) => poisson(rate * wi * burstMult(burst, i, t) * (TICK_MS / 1000), rndT));
   const incomingTotal = sum(incoming);
 
   // 3. An omniscient limiter on the same arrivals: the baseline for the ledgers.
@@ -276,14 +296,28 @@ export function stepSim(prev: SimState, config: SimConfig): SimState {
     }
   }
 
+  // 10. Ticket drops: a drop is over once the venue is full and nobody has sold for three ticks.
+  const drop: DropState = { ...prev.drop, failed: prev.drop.failed + sum(failed), latencySum: prev.drop.latencySum + latencyMs * answeredTotal, answered: prev.drop.answered + answeredTotal };
+  let drops = prev.drops;
+  if (!finite && drop.closedAt === null && truthWindow >= L && admittedTotal === 0 && t - drop.startTick >= 3
+    && sum(prev.history.slice(-2).map((s) => s.admitted)) === 0) {
+    drop.closedAt = t;
+    const rec: DropRecord = {
+      n: drop.n, mode: config.mode, gossipMs: config.gossipMs, cut: config.partitioned.flatMap((p, i) => (p ? [i] : [])),
+      sold: truthWindow, failed: drop.failed, durationTicks: t - drop.startTick, latencyMs: drop.answered ? drop.latencySum / drop.answered : 0,
+    };
+    drops = [...prev.drops, rec].slice(-6);
+  }
+
   const sample: MetricsSample = {
     tick: t, incoming: incomingTotal, admitted: admittedTotal, rejected: sum(rejected), failed: sum(failed),
     offeredWindow, truthWindow, storeWindow, overshoot: Math.max(0, truthWindow - L), availability, latencyMs,
     debt, under, nodes: nodeSamples, cut, healed: healedNode, burstStart: burstStartedOn ?? undefined,
+    dropStart: !finite && t === drop.startTick && drop.n > 1 ? true : undefined,
   };
   return {
     ...prev, tick: t, rngTraffic: rt, rngLatency: rl, mode: config.mode, nodes, hub, idealRing, idealTotal,
-    burst, lastBurstEnd, partitionSince, debtAtCut, failedAtCut, nodeFailed, cum, ledger,
+    burst, lastBurstEnd, partitionSince, debtAtCut, failedAtCut, nodeFailed, cum, ledger, drop, drops,
     history: prev.history.length >= HISTORY ? [...prev.history.slice(1), sample] : [...prev.history, sample],
     events: { synced, cpRoundTrips: config.mode === 'cp' ? answered : zeros(), burstStartedOn, healed },
     lastReport: healed ?? prev.lastReport,
@@ -378,20 +412,26 @@ function particlesFor(sample: MetricsSample, events: TickEvents, mode: Mode, par
   return out;
 }
 
-const TOUR: { title: string; body: string; apply: Partial<SimConfig> }[] = [
-  { title: 'Meet the limit', apply: { mode: 'ap', ratePerNode: 150, gossipMs: 600, partitioned: NONE },
-    body: 'Four edge servers share one rule: admit at most 1,000 requests per second, total. Green dots get in, red bounce. The center shows the real total.' },
-  { title: 'Fast, local, wrong', apply: { mode: 'ap', ratePerNode: 400, gossipMs: 1200, partitioned: NONE },
-    body: 'Traffic is now 1,600/s. Each node decides in ~1 ms from the last count it heard. A view older than the 1 s window is blind, so nearly everything gets in. Watch the red.' },
-  { title: 'Sync harder', apply: { gossipMs: 200 },
-    body: 'Syncing every tick shrinks the overshoot to ~15 %. It never reaches zero: four nodes are filling the same budget at the same moment. News takes time to travel.' },
-  { title: 'Ask before answering', apply: { mode: 'cp' },
-    body: 'Strong mode: every request phones the store first. Never above 1,000, but every answer now costs 15–160 ms. Watch the latency tile and the amber traffic on the wires.' },
-  { title: 'Cut the cable', apply: { mode: 'cp', partitioned: [false, false, false, true] },
-    body: 'Tokyo lost its link. It cannot verify, so it fails closed: every Tokyo user gets an error. Availability drops to 75 %.' },
-  { title: 'Choose', apply: { mode: 'ap', partitioned: [false, false, false, true] },
-    body: 'Same outage, eventual mode: Tokyo keeps serving from a view that ages every second. Heal the link to see the bill. That is CAP: when the network breaks, you choose available or right.' },
+// Each step applies settings, then spotlights the element carrying the matching data-tour attribute.
+const TOUR: { title: string; body: string; target: string; apply: Partial<SimConfig> }[] = [
+  { title: 'One rule, four servers', target: 'store', apply: { mode: 'ap', ratePerNode: 150, gossipMs: 600, partitioned: NONE, windowTicks: WINDOW_TICKS },
+    body: 'The center is the truth: how many requests all four edges really admitted in the last second. The rule is 1,000. Green dots got in, red ones bounced.' },
+  { title: 'Every edge decides alone', target: 'node-0', apply: {},
+    body: 'Virginia only knows its own count plus what it last heard from the others. The blue bar is the total it believes; the white tick is the truth.' },
+  { title: 'Fast, local, wrong', target: 'traffic', apply: { ratePerNode: 400, gossipMs: 1200 },
+    body: 'Traffic is now 1,600/s and the edges only hear from each other every 1.2 s. Each says yes from a stale view, so the center runs past 1,000. Watch the red.' },
+  { title: 'Sync harder', target: 'gossip', apply: { gossipMs: 200 },
+    body: 'Gossip every tick. The overshoot shrinks to about 15 % but never reaches zero: four servers are filling the same budget at the same moment.' },
+  { title: 'Ask before answering', target: 'modes', apply: { mode: 'cp' },
+    body: 'Strong mode: every request phones the store first. Never above 1,000, but every answer now costs a round trip. Watch the latency tile and the amber traffic on the wires.' },
+  { title: 'Cut the cable', target: 'wire-3', apply: { mode: 'cp', partitioned: [false, false, false, true] },
+    body: 'Tokyo lost its link to the store. It cannot verify, so it fails closed: every Tokyo user gets an error and availability drops to 75 %.' },
+  { title: 'Choose', target: 'node-3', apply: { mode: 'ap', partitioned: [false, false, false, true] },
+    body: 'Same outage, eventual mode: Tokyo keeps answering from a view that ages every second. That is the CAP choice: when the network breaks, be available or be right.' },
+  { title: 'The bill', target: 'debt', apply: { mode: 'ap', partitioned: NONE },
+    body: 'Healing the link sends the bill: every request Tokyo let through beyond the limit. Debt is the price of availability. Next, try the ticket sale, where the debt is people without seats.' },
 ];
+const TOUR_STEP_MS = 9000;
 
 const PRESET_META: { id: keyof typeof PRESETS; label: string; hint: string; Icon: typeof Waves }[] = [
   { id: 'calm', label: 'Calm', hint: 'Under the limit. Nothing to fight over.', Icon: Waves },
@@ -419,20 +459,30 @@ function narrate(last: MetricsSample, config: SimConfig, sim: SimState, heal: { 
     const t = since === null ? '0.0' : secs(last.tick - since);
     const n = last.nodes[i];
     if (config.mode === 'cp')
-      return { key: `cut-cp-${i}`, prio: 4, text: `${code(i)} can't reach the store, so it refuses everyone: ${fmt(n.failed * 5)} errors/s. The global count stays exact.` };
+      return { key: `cut-cp-${i}`, prio: 4, text: tickets
+        ? `${code(i)} can't reach the store, so it sells nothing: ${fmt(n.failed * 5)} buyers/s get errors. The seat count stays exact.`
+        : `${code(i)} can't reach the store, so it refuses everyone: ${fmt(n.failed * 5)} errors/s. The global count stays exact.` };
     if (config.mode === 'static')
       return { key: `cut-st-${i}`, prio: 4, text: `${code(i)} is cut off and doesn't care: a fixed 250 req/s quota needs no one. Exact, until traffic moves.` };
     const excess = Math.max(0, Math.round(last.debt - sim.debtAtCut[i]));
     const blind = n.viewAgeTicks === Infinity || n.viewAgeTicks >= WINDOW_TICKS;
+    if (tickets) return { key: `cut-tk-${i}`, prio: 4, text: last.truthWindow > L
+      ? `${code(i)} is cut off and still selling — it cannot hear that the venue is full. ${fmt(last.truthWindow - L)} seats oversold so far.`
+      : `${code(i)} is cut off ${t} s and keeps selling from the last count it heard. It will not hear when the venue fills.` };
     return { key: `cut-ap-${i}`, prio: 4, text: blind
       ? `${code(i)} lost its link ${t} s ago and serves blind — it counts only itself now. ${fmt(excess)} beyond the limit so far.`
       : `${code(i)} lost its link ${t} s ago and keeps serving from a ${secs(n.viewAgeTicks)} s-old view — ${fmt(excess)} beyond the limit so far.` };
   }
   if (tickets) {
-    const sold = last.truthWindow;
-    if (sold > L) return { key: 'oversold', prio: 3, text: `Sold ${fmt(sold)} of ${fmt(L)} seats — ${fmt(sold - L)} people hold tickets to seats that don't exist.` };
-    if (sold >= L) return { key: 'soldout', prio: 3, text: `${fmt(L)} of ${fmt(L)} sold, exactly. Every buyer waited ${fmt(last.latencyMs)} ms for the store to say yes.` };
-    return { key: 'selling', prio: 1, text: `${fmt(sold)} of ${fmt(L)} seats sold. ${fmt(last.offeredWindow)} buyers/s are hitting four regional sites.` };
+    const sold = last.truthWindow, d = sim.drop;
+    if (d.closedAt !== null) {
+      const wait = secs(Math.max(0, DROP_HOLD_TICKS - (last.tick - d.closedAt)));
+      if (sold > L) return { key: `drop-over-${d.n}`, prio: 3, text: `Drop ${d.n} sold ${fmt(sold)} of ${fmt(L)} seats — ${fmt(sold - L)} people hold tickets to seats that don't exist. Next drop in ${wait} s.` };
+      if (config.mode === 'cp') return { key: `drop-exact-${d.n}`, prio: 3, text: `Drop ${d.n}: ${fmt(L)} of ${fmt(L)} sold, exactly. Every buyer waited ~${fmt(d.answered ? d.latencySum / d.answered : 0)} ms for the store. Next drop in ${wait} s.` };
+      return { key: `drop-exact-${d.n}`, prio: 3, text: `Drop ${d.n}: ${fmt(L)} of ${fmt(L)} sold, exactly — each site stopped at its own 250. Next drop in ${wait} s.` };
+    }
+    if (sold > L) return { key: 'overselling', prio: 3, text: `The venue is full and sites are still selling: ${fmt(sold - L)} seats oversold so far. Nobody has heard the news yet.` };
+    return { key: 'selling', prio: 1, text: `Drop ${d.n}: ${fmt(sold)} of ${fmt(L)} seats sold, ${fmt(last.offeredWindow)} buyers/s across four sites.` };
   }
   const saturated = last.offeredWindow >= 0.9 * L || last.truthWindow >= 0.95 * L;
   if (saturated) {
@@ -457,8 +507,8 @@ function narrate(last: MetricsSample, config: SimConfig, sim: SimState, heal: { 
   return { key: 'under', prio: 1, text: `Total traffic is ${fmt(last.offeredWindow)} req/s, under the ${fmt(L)} limit — every node can say yes without asking anyone.` };
 }
 
-function Header({ config, running, onMode, onScenario, onRun, onReset }: {
-  config: SimConfig; running: boolean; onMode: (m: Mode) => void; onScenario: () => void; onRun: () => void; onReset: () => void;
+function Header({ config, running, onMode, onScenario, onRun, onReset, onIntro }: {
+  config: SimConfig; running: boolean; onMode: (m: Mode) => void; onScenario: () => void; onRun: () => void; onReset: () => void; onIntro: () => void;
 }) {
   const tickets = config.windowTicks === Infinity;
   return (
@@ -469,9 +519,12 @@ function Header({ config, running, onMode, onScenario, onRun, onReset }: {
           <div className="text-base font-semibold tracking-tight text-zinc-100">CAP in practice</div>
           <div className="text-[11px] text-zinc-500">one global rate limit · four edge nodes · one truth</div>
         </div>
+        <button onClick={onIntro} className="ml-2 flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] text-zinc-300 hover:border-zinc-600" title="What is this and what is CAP?">
+          <Info size={12} className="text-emerald-400" /> What is CAP?
+        </button>
       </div>
       <div className="flex flex-1 justify-center">
-        <div className="flex rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
+        <div data-tour="modes" className="flex rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
           {MODES.map(({ id, label, sub, accent, Icon }) => {
             const active = config.mode === id;
             return (
@@ -488,7 +541,7 @@ function Header({ config, running, onMode, onScenario, onRun, onReset }: {
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <button onClick={onScenario} title="Switch between the rate limiter and a 1,000-seat ticket sale"
+        <button data-tour="scenario" onClick={onScenario} title="Switch between the rate limiter and a 1,000-seat ticket sale"
           className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-[12px] text-zinc-300 hover:border-zinc-600">
           {tickets ? <Ticket size={13} className="text-violet-400" /> : <Gauge size={13} className="text-emerald-400" />}
           {tickets ? 'Ticket sale' : 'Rate limit'}
@@ -504,31 +557,132 @@ function Header({ config, running, onMode, onScenario, onRun, onReset }: {
   );
 }
 
-function TourRow({ step, onStep, onClose }: { step: number | null; onStep: (s: number) => void; onClose: () => void }) {
+function TourRow({ step, auto, onStep, onAuto, onClose }: {
+  step: number | null; auto: boolean; onStep: (s: number) => void; onAuto: (a: boolean) => void; onClose: () => void;
+}) {
   if (step === null) {
     return (
-      <div className="flex h-11 items-center">
-        <button onClick={() => onStep(0)} className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-[12px] text-zinc-200 hover:border-zinc-500">
-          <GraduationCap size={14} className="text-emerald-400" /> Take the 60-second tour
+      <div className="flex h-11 items-center gap-2">
+        <button onClick={() => { onAuto(false); onStep(0); }} className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-[12px] text-zinc-200 hover:border-zinc-500">
+          <GraduationCap size={14} className="text-emerald-400" /> Take the guided tour
+        </button>
+        <button onClick={() => { onAuto(true); onStep(0); }} className="flex items-center gap-2 rounded-full border border-zinc-800 px-3 py-1.5 text-[12px] text-zinc-400 hover:border-zinc-600 hover:text-zinc-200" title="Plays all eight steps, nine seconds each">
+          <Play size={12} /> Auto-play it
         </button>
       </div>
     );
   }
   const s = TOUR[step];
+  const last = step === TOUR.length - 1;
   return (
-    <div className="flex h-11 items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/80 px-3">
+    <div className="relative flex h-11 items-center gap-3 overflow-hidden rounded-lg border border-emerald-500/40 bg-zinc-900/90 px-3">
       <GraduationCap size={15} className="shrink-0 text-emerald-400" />
       <span className="shrink-0 font-mono text-[11px] text-zinc-500">{step + 1}/{TOUR.length}</span>
       <span className="shrink-0 text-[13px] font-semibold text-zinc-100">{s.title}</span>
       <span className="min-w-0 flex-1 truncate text-[12px] text-zinc-300" title={s.body}>{s.body}</span>
+      <button onClick={() => onAuto(!auto)} className={cls('flex items-center gap-1 rounded-md border px-2 py-1 text-[11px]', auto ? 'border-emerald-500/60 text-emerald-300' : 'border-zinc-700 text-zinc-400 hover:text-zinc-100')} title="Advance automatically every nine seconds">
+        {auto ? <Pause size={11} /> : <Play size={11} />} Auto
+      </button>
       <button onClick={() => onStep(step - 1)} disabled={step === 0} className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] text-zinc-400 hover:text-zinc-100 disabled:opacity-30">
         <ChevronLeft size={13} /> Back
       </button>
-      <button onClick={() => (step === TOUR.length - 1 ? onClose() : onStep(step + 1))} className="flex items-center gap-1 rounded-md bg-zinc-100 px-2.5 py-1 text-[12px] font-medium text-zinc-900 hover:bg-white">
-        {step === TOUR.length - 1 ? 'Done' : 'Next'} {step < TOUR.length - 1 && <ChevronRight size={13} />}
+      <button onClick={() => (last ? onClose() : onStep(step + 1))} className="flex items-center gap-1 rounded-md bg-zinc-100 px-2.5 py-1 text-[12px] font-medium text-zinc-900 hover:bg-white">
+        {last ? 'Done' : 'Next'} {!last && <ChevronRight size={13} />}
       </button>
       <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200" title="Close tour"><X size={14} /></button>
+      {auto && <div key={step} className="absolute bottom-0 left-0 h-0.5 bg-emerald-400" style={{ animation: `tour-progress ${TOUR_STEP_MS}ms linear forwards` }} />}
     </div>
+  );
+}
+
+// Dims the page around the element tagged data-tour={target}; clicks pass through.
+function Spotlight({ target }: { target: string | null }) {
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  useEffect(() => {
+    if (!target) { setRect(null); return; }
+    const measure = () => {
+      const el = document.querySelector(`[data-tour="${target}"]`);
+      setRect(el ? el.getBoundingClientRect() : null);
+    };
+    measure();
+    const id = setInterval(measure, 400);
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    return () => { clearInterval(id); window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true); };
+  }, [target]);
+  if (!rect) return null;
+  return (
+    <div className="pointer-events-none fixed z-40 rounded-lg ring-2 ring-emerald-400 spotlight"
+      style={{ left: rect.left - 6, top: rect.top - 6, width: rect.width + 12, height: rect.height + 12, boxShadow: '0 0 0 9999px rgba(9, 9, 11, 0.6)' }} />
+  );
+}
+
+function Intro({ onTour, onClose }: { onTour: () => void; onClose: () => void }) {
+  const h = 'flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-400';
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/85 p-6 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-3xl rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start gap-3">
+          <Globe size={22} className="mt-0.5 text-emerald-400" />
+          <div className="flex-1">
+            <div className="text-lg font-semibold text-zinc-100">CAP in practice</div>
+            <div className="text-[13px] text-zinc-400">A live simulation of one hard rule enforced by many servers at once.</div>
+          </div>
+          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200" title="Close"><X size={16} /></button>
+        </div>
+        <div className="mt-5 grid grid-cols-3 gap-5 text-[13px] leading-relaxed text-zinc-300">
+          <section>
+            <div className={h}><Server size={12} /> The problem</div>
+            <p className="mt-1.5">A CDN runs edge servers around the world. A customer says: <span className="text-zinc-100">"let at most 1,000 requests per second reach my API."</span> Each edge sees only its own traffic, yet together they must keep that one promise.</p>
+          </section>
+          <section>
+            <div className={h}><Scale size={12} /> The CAP theorem</div>
+            <p className="mt-1.5">Servers spread over a network want <span className="text-zinc-100">C</span>onsistency (everyone sees the same count), <span className="text-zinc-100">A</span>vailability (every request gets an answer) and <span className="text-zinc-100">P</span>artition tolerance (it keeps working when the network breaks). Networks do break, and while one is broken you keep only one of the other two: answer from what you know and risk being wrong, or refuse what you cannot verify.</p>
+          </section>
+          <section>
+            <div className={h}><Gauge size={12} /> How to read the screen</div>
+            <p className="mt-1.5">The center card is the truth. Each edge card shows what that server believes. Sliders set the traffic and how often the edges talk. Scissors cut a wire. Red on the chart means the promise was broken; the Debt tile counts how badly.</p>
+          </section>
+        </div>
+        <div className="mt-6 flex items-center gap-3">
+          <button onClick={onTour} className="flex items-center gap-2 rounded-md bg-emerald-400 px-3.5 py-2 text-[13px] font-semibold text-zinc-950 hover:bg-emerald-300">
+            <GraduationCap size={15} /> Take the guided tour
+          </button>
+          <button onClick={onClose} className="rounded-md border border-zinc-700 px-3.5 py-2 text-[13px] text-zinc-200 hover:border-zinc-500">Explore on my own</button>
+          <span className="ml-auto text-[11px] text-zinc-500">Reopen any time with "What is CAP?" in the header.</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const modeShort = (m: Mode) => (m === 'ap' ? 'AP' : m === 'cp' ? 'CP' : 'quota');
+
+function DropStatus({ sim, L }: { sim: SimState; L: number }) {
+  const d = sim.drop;
+  const sold = sim.history[sim.history.length - 1]?.truthWindow ?? 0;
+  const closed = d.closedAt !== null;
+  const wait = closed ? Math.max(0, DROP_HOLD_TICKS - (sim.tick - (d.closedAt as number))) : 0;
+  const tone = !closed ? 'border-emerald-500/50 text-emerald-300' : sold > L ? 'border-rose-500/60 text-rose-300' : 'border-amber-400/60 text-amber-300';
+  return (
+    <>
+      <div className={cls('absolute left-1/2 top-2 -translate-x-1/2 whitespace-nowrap rounded-full border bg-zinc-950/90 px-3 py-1 font-mono text-[11px]', tone)}>
+        {closed
+          ? `Drop ${d.n} · sold out · ${fmt(sold)} / ${fmt(L)}${sold > L ? ` · ${fmt(sold - L)} oversold` : ' · exact'} · next in ${secs(wait)} s`
+          : `Drop ${d.n} · selling · ${fmt(sold)} / ${fmt(L)} seats · ${secs(sim.tick - d.startTick)} s`}
+      </div>
+      {sim.drops.length > 0 && (
+        <div className="absolute bottom-2 left-1/2 flex -translate-x-1/2 gap-1.5 whitespace-nowrap">
+          {sim.drops.slice(-4).map((r) => (
+            <div key={r.n} className={cls('rounded-md border bg-zinc-950/90 px-2 py-1 font-mono text-[10px]', r.sold > L ? 'border-rose-500/50 text-rose-300' : 'border-emerald-500/40 text-emerald-300')}
+              title={`Drop ${r.n}: ${r.durationTicks * TICK_MS / 1000 | 0} s, mean decision ${fmt(r.latencyMs)} ms`}>
+              <span className="text-zinc-500">#{r.n} {modeShort(r.mode)}{r.mode === 'ap' ? ` ${r.gossipMs} ms` : ''}{r.cut.length ? ` · ${r.cut.map((i) => NODES[i].code).join('+')} cut` : ''}</span>
+              <span className="ml-1.5">{fmt(r.sold)} sold{r.sold > L ? ` (+${fmt(r.sold - L)})` : ''}{r.failed ? ` · ${fmt(r.failed)} errors` : ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -542,7 +696,7 @@ function StoreCard({ last, config, pingKey }: { last: MetricsSample | undefined;
   const showKnows = config.mode === 'ap' && Math.abs(knows - truth) > 0.02 * L;
   const hex = ACCENT[modeMeta(config.mode).accent].hex;
   return (
-    <div key={pingKey} className="absolute left-1/2 top-1/2 w-[236px] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-zinc-700 bg-zinc-900/95 p-3 shadow-xl backdrop-blur"
+    <div key={pingKey} data-tour="store" className="absolute left-1/2 top-1/2 w-[236px] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-zinc-700 bg-zinc-900/95 p-3 shadow-xl backdrop-blur"
       style={{ '--accent': hex, animation: pingKey ? 'store-ping 700ms ease-out' : undefined } as CSSProperties}>
       <div className="flex items-center gap-1.5 whitespace-nowrap text-[10px] uppercase tracking-[0.1em] text-zinc-500">
         <Database size={12} className="text-zinc-400" /> Global store · ground truth
@@ -583,7 +737,7 @@ function NodeCard({ i, ns, config, truth, cut }: { i: number; ns: NodeSample; co
   const led = cut ? 'bg-rose-500 shadow-[0_0_8px_#f43f5e] led-blink' : ns.rejected > 0 ? 'bg-amber-400 shadow-[0_0_6px_#fbbf24]' : 'bg-emerald-400 shadow-[0_0_6px_#34d399]';
   const inc = Math.max(1, ns.incoming);
   return (
-    <div className={cls('group absolute w-[176px] -translate-x-1/2 -translate-y-1/2 rounded-lg border bg-zinc-900/95 p-2 shadow-lg backdrop-blur transition-colors',
+    <div data-tour={`node-${i}`} className={cls('group absolute w-[176px] -translate-x-1/2 -translate-y-1/2 rounded-lg border bg-zinc-900/95 p-2 shadow-lg backdrop-blur transition-colors',
       cut ? 'border-rose-500/60' : 'border-zinc-800 hover:border-zinc-600')} style={at(POS[i])}>
       <div className="flex items-center gap-1.5">
         <Server size={12} className="text-zinc-400" />
@@ -608,7 +762,7 @@ function NodeCard({ i, ns, config, truth, cut }: { i: number; ns: NodeSample; co
         <div className="absolute top-[-2px] h-2.5 w-px bg-zinc-500" style={{ left: '66.7%' }} />
       </div>
       <div className={cls('mt-1 text-[11px]', ap ? ageTone : 'text-sky-400/80')}>
-        {ap ? <>believes global ≈ <span className="font-mono">{fmt(believed)}</span></>
+        {ap ? <>believes {config.windowTicks === Infinity ? 'sold' : 'global'} ≈ <span className="font-mono">{fmt(believed)}</span></>
           : cp ? <>sees global = <span className="font-mono">{fmt(truth)}</span> (live)</>
           : <>own quota <span className="font-mono">{fmt(ns.windowAdmitted)}</span> / 250</>}
       </div>
@@ -666,10 +820,11 @@ function Stage({ sim, config, batches, flashes, floats, pingKey, onToggleLink }:
       {last && NODES.map((n, i) => (
         <NodeCard key={n.code} i={i} ns={last.nodes[i]} config={config} truth={last.truthWindow} cut={config.partitioned[i]} />
       ))}
+      {config.windowTicks === Infinity && <DropStatus sim={sim} L={config.limit} />}
       {POS.map((p, i) => {
         const cut = config.partitioned[i];
         return (
-          <button key={i} onClick={() => onToggleLink(i)} style={at({ x: (p.x + STORE.x) / 2, y: (p.y + STORE.y) / 2 })}
+          <button key={i} data-tour={`wire-${i}`} onClick={() => onToggleLink(i)} style={at({ x: (p.x + STORE.x) / 2, y: (p.y + STORE.y) / 2 })}
             title={cut ? `Heal ${NODES[i].city}'s link` : `Cut ${NODES[i].city}'s link to the store`}
             className={cls('absolute flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border transition-colors',
               cut ? 'border-rose-500 bg-zinc-950 text-rose-400 ring-2 ring-rose-500/30' : 'border-zinc-700 bg-zinc-900 text-zinc-500 hover:border-zinc-400 hover:text-zinc-100')}>
@@ -681,9 +836,9 @@ function Stage({ sim, config, batches, flashes, floats, pingKey, onToggleLink }:
   );
 }
 
-function Tile({ label, value, sub, tone, pop }: { label: string; value: string; sub: string; tone: string; pop?: number }) {
+function Tile({ label, value, sub, tone, pop, hint, tour }: { label: string; value: string; sub: string; tone: string; pop?: number; hint: string; tour?: string }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+    <div data-tour={tour} title={hint} className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
       <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
       <div key={pop} className={cls('font-mono text-2xl font-semibold tabular-nums leading-tight', tone)} style={pop ? { animation: 'pop 200ms ease-out' } : undefined}>{value}</div>
       <div className="truncate text-[11px] text-zinc-500">{sub}</div>
@@ -704,12 +859,18 @@ function Metrics({ history, config }: { history: MetricsSample[]; config: SimCon
   const tickets = config.windowTicks === Infinity;
   return (
     <div className="grid grid-cols-6 gap-2">
-      <Tile label="Incoming" value={fmt(last?.offeredWindow ?? 0)} sub="req/s offered" tone="text-zinc-200" />
-      <Tile label={tickets ? 'Sold (truth)' : 'Admitted (truth)'} value={fmt(admitted)} sub={admitted > L ? 'OVER THE LIMIT' : `${fmt(rejected)} rejected /s`} tone={admitted > L ? 'text-rose-400' : 'text-emerald-400'} />
-      <Tile label="Overshoot" value={over > 0 ? `+${fmt(over)}` : '0'} sub={tickets ? 'seats oversold' : 'req/s over limit'} tone={over > 0 ? 'text-rose-400' : 'text-zinc-500'} />
-      <Tile label="Debt" value={fmt(debt)} sub={under > 0 ? `${fmt(under)} turned away needlessly` : 'over the limit, in this mode'} tone={debt > 0 ? 'text-rose-400' : 'text-zinc-500'} pop={Math.floor(debt / 50)} />
-      <Tile label="Availability" value={`${avail.toFixed(1)}%`} sub="requests that got an answer" tone={avail >= 99.5 ? 'text-emerald-400' : avail >= 90 ? 'text-amber-400' : 'text-rose-400'} />
-      <Tile label="Decision latency" value={lat < 5 ? '~1 ms' : `${fmt(lat)} ms`} sub={config.mode === 'cp' ? 'one round trip per request' : 'decided locally'} tone={lat < 5 ? 'text-sky-400' : 'text-amber-400'} />
+      <Tile label="Incoming" value={fmt(last?.offeredWindow ?? 0)} sub={tickets ? 'buyers/s arriving' : 'req/s offered'} tone="text-zinc-200"
+        hint="Requests arriving at all four edges in the last second, before any decision." />
+      <Tile label={tickets ? 'Sold (truth)' : 'Admitted (truth)'} value={fmt(admitted)} sub={admitted > L ? 'OVER THE LIMIT' : `${fmt(rejected)} rejected /s`} tone={admitted > L ? 'text-rose-400' : 'text-emerald-400'}
+        hint={tickets ? 'Seats actually sold in this drop, all sites combined.' : 'What actually got through in the last second, all edges combined. This is the ground truth, not what any node believes.'} />
+      <Tile label="Overshoot" value={over > 0 ? `+${fmt(over)}` : '0'} sub={tickets ? 'seats oversold' : 'req/s over limit'} tone={over > 0 ? 'text-rose-400' : 'text-zinc-500'}
+        hint="How far the real total is above the 1,000 limit right now. Anything above zero is a broken promise." />
+      <Tile label="Debt" value={fmt(debt)} sub={under > 0 ? `${fmt(under)} turned away needlessly` : 'over the limit, in this mode'} tone={debt > 0 ? 'text-rose-400' : 'text-zinc-500'} pop={Math.floor(debt / 50)} tour="debt"
+        hint="Requests admitted beyond the limit since you chose this mode, measured against a perfect limiter on the same traffic. The sub-line counts requests refused while there was still room." />
+      <Tile label="Availability" value={`${avail.toFixed(1)}%`} sub="requests that got an answer" tone={avail >= 99.5 ? 'text-emerald-400' : avail >= 90 ? 'text-amber-400' : 'text-rose-400'}
+        hint="Share of requests that received any answer in the last second. A cut-off node in Strong mode answers nobody, so its users count against this." />
+      <Tile label="Decision latency" value={lat < 5 ? '~1 ms' : `${fmt(lat)} ms`} sub={config.mode === 'cp' ? 'one round trip per request' : 'decided locally'} tone={lat < 5 ? 'text-sky-400' : 'text-amber-400'} tour="latency"
+        hint="How long a request waits for its admit-or-reject decision. Local decisions take about a millisecond; asking the store costs a round trip to Virginia." />
     </div>
   );
 }
@@ -732,9 +893,9 @@ function Chart({ history, config }: { history: MetricsSample[]; config: SimConfi
     : '';
   const label = 'font-mono text-[10px] fill-zinc-500';
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 pt-1">
+    <div data-tour="chart" className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 pt-1" title="The real admitted rate over the last 30 seconds against the limit. Red fill is the broken promise; the thin amber line is decision latency.">
       <div className="flex items-center gap-1.5 px-1 text-[10px] uppercase tracking-wider text-zinc-500">
-        <Activity size={11} /> last 30 s · <span className="text-emerald-400">admitted</span> · <span className="text-rose-400">overshoot</span> · <span className="text-zinc-400">offered</span> · <span className="text-amber-400">latency</span>
+        <Activity size={11} /> last 30 s · <span className="text-emerald-400">{tickets ? 'sold' : 'admitted'}</span> · <span className="text-rose-400">{tickets ? 'oversold' : 'overshoot'}</span>{!tickets && <> · <span className="text-zinc-400">offered</span></>} · <span className="text-amber-400">latency</span>{tickets && <> · <span className="text-violet-400">new drop</span></>}
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ aspectRatio: `${W} / ${H}` }}>
         <path d={area((s) => Math.min(s.truthWindow, L), () => 0)} className="fill-emerald-500/15" />
@@ -744,9 +905,9 @@ function Chart({ history, config }: { history: MetricsSample[]; config: SimConfi
         <path d={path((s) => s.latencyMs, yl)} fill="none" strokeWidth={1} className="stroke-amber-400/80" />
         <line x1={PL} x2={W - PR} y1={ys(L)} y2={ys(L)} strokeWidth={1} strokeDasharray="5 4" className="stroke-zinc-400" />
         <text x={W - PR - 4} y={ys(L) - 4} textAnchor="end" className={label}>limit {fmt(L)}</text>
-        {pts.filter((p) => p.s.cut !== undefined || p.s.healed !== undefined || p.s.burstStart !== undefined).map((p) => (
-          <line key={p.s.tick} x1={p.x} x2={p.x} y1={PT} y2={PT + 10} strokeWidth={2}
-            className={p.s.cut !== undefined ? 'stroke-rose-500' : p.s.healed !== undefined ? 'stroke-emerald-400' : 'stroke-orange-400'} />
+        {pts.filter((p) => p.s.cut !== undefined || p.s.healed !== undefined || p.s.burstStart !== undefined || p.s.dropStart).map((p) => (
+          <line key={p.s.tick} x1={p.x} x2={p.x} y1={PT} y2={p.s.dropStart ? H - PB : PT + 10} strokeWidth={p.s.dropStart ? 1 : 2} strokeDasharray={p.s.dropStart ? '3 3' : undefined}
+            className={p.s.cut !== undefined ? 'stroke-rose-500' : p.s.healed !== undefined ? 'stroke-emerald-400' : p.s.dropStart ? 'stroke-violet-400/70' : 'stroke-orange-400'} />
         ))}
         <text x={PL - 4} y={ys(0) + 3} textAnchor="end" className={label}>0</text>
         <text x={PL - 4} y={ys(L) + 3} textAnchor="end" className={label}>{tickets ? '1k' : '1k'}</text>
@@ -761,27 +922,28 @@ function Chart({ history, config }: { history: MetricsSample[]; config: SimConfi
   );
 }
 
-function Controls({ config, update, onPreset, onSpike, sim }: {
-  config: SimConfig; update: (p: Partial<SimConfig>) => void; onPreset: (id: keyof typeof PRESETS) => void; onSpike: () => void; sim: SimState;
+function Controls({ config, update, onPreset, onSpike, onNewDrop, sim }: {
+  config: SimConfig; update: (p: Partial<SimConfig>) => void; onPreset: (id: keyof typeof PRESETS) => void; onSpike: () => void; onNewDrop: () => void; sim: SimState;
 }) {
   const meta = modeMeta(config.mode);
   const slider = ACCENT[meta.accent].slider;
   const cp = config.mode === 'cp';
   const blind = config.gossipMs >= WINDOW_TICKS * TICK_MS;
   const tickets = config.windowTicks === Infinity;
+  const rate = tickets ? config.ratePerNode * TICKET_RATE_SCALE : config.ratePerNode;
   const section = 'text-[10px] uppercase tracking-wider text-zinc-500';
   return (
     <div className="flex flex-col gap-4 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
-      <div>
+      <div data-tour="traffic" title="Mean arrivals per node. Traffic is random around this value and one region is always a little hotter than the others.">
         <div className="flex items-baseline justify-between">
           <span className={section}>Traffic</span>
-          <span className="font-mono text-[13px] tabular-nums text-zinc-100">{config.ratePerNode} <span className="text-zinc-500">{tickets ? 'buyers/s' : 'req/s'}</span></span>
+          <span className="font-mono text-[13px] tabular-nums text-zinc-100">{fmt(rate)} <span className="text-zinc-500">{tickets ? 'buyers/s' : 'req/s'}</span></span>
         </div>
-        <div className="text-[11px] text-zinc-400">Incoming per node</div>
+        <div className="text-[11px] text-zinc-400">{tickets ? 'Buyers per site' : 'Incoming per node'}</div>
         <input type="range" min={0} max={500} step={10} value={config.ratePerNode} onChange={(e) => update({ ratePerNode: +e.target.value })} className={cls('mt-1 w-full', slider)} />
-        <div className="font-mono text-[11px] text-zinc-500">≈ {fmt(config.ratePerNode * N)} total · limit {fmt(config.limit)}{tickets ? ' seats' : ' req/s'}</div>
+        <div className="font-mono text-[11px] text-zinc-500">≈ {fmt(rate * N)} total · {tickets ? `${fmt(config.limit)} seats per drop` : `limit ${fmt(config.limit)} req/s`}</div>
       </div>
-      <div className={cp || config.mode === 'static' ? 'opacity-50' : ''}>
+      <div data-tour="gossip" title="How often each edge exchanges counters with the store in Eventual mode. Longer means a staler view." className={cp || config.mode === 'static' ? 'opacity-50' : ''}>
         <div className="flex items-baseline justify-between">
           <span className={section}>Sync</span>
           <span className="font-mono text-[13px] tabular-nums text-zinc-100">{config.gossipMs} <span className="text-zinc-500">ms</span></span>
@@ -826,6 +988,11 @@ function Controls({ config, update, onPreset, onSpike, sim }: {
           <button onClick={onSpike} title="A 3× flash crowd on a random node for 4 s" className="flex items-center gap-1.5 rounded-md border border-orange-500/40 bg-zinc-900 px-2 py-1 text-[12px] text-orange-300 hover:border-orange-400">
             <Zap size={12} /> Spike a node
           </button>
+          {tickets && (
+            <button onClick={onNewDrop} title="Clear the seats and start selling again with the current settings" className="flex items-center gap-1.5 rounded-md border border-violet-500/40 bg-zinc-900 px-2 py-1 text-[12px] text-violet-300 hover:border-violet-400">
+              <Ticket size={12} /> New drop
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -876,6 +1043,8 @@ export default function CapSimulator() {
   const [sim, setSim] = useState(() => createSim(DEFAULT_CONFIG, SEED));
   const [running, setRunning] = useState(true);
   const [tour, setTour] = useState<number | null>(null);
+  const [auto, setAuto] = useState(false);
+  const [intro, setIntro] = useState(false);
   const [batches, setBatches] = useState<Batch[]>([]);
   const [flashes, setFlashes] = useState<Flash[]>([]);
   const [floats, setFloats] = useState<Float[]>([]);
@@ -916,28 +1085,60 @@ export default function CapSimulator() {
     setNarration((cur) => (cur && cur.key !== next.key && next.prio <= cur.prio && sim.tick - cur.since < 8 ? cur : cur && cur.key === next.key ? { ...cur, text: next.text } : { ...next, since: sim.tick }));
   }, [sim.tick]);
 
+  // First visit: explain what this is before the numbers start moving.
+  useEffect(() => {
+    try { if (!localStorage.getItem('capsim.intro')) setIntro(true); } catch { setIntro(true); }
+  }, []);
+  const closeIntro = () => { setIntro(false); try { localStorage.setItem('capsim.intro', '1'); } catch { /* private mode */ } };
+
+  const tickets = config.windowTicks === Infinity;
   const update = (p: Partial<SimConfig>) => setConfig((c) => ({ ...c, ...p }));
-  const setMode = (mode: Mode) => { if (mode !== config.mode) { update({ mode }); setPingKey((k) => k + 1); } };
+  // In the ticket sale, a mode or link change restarts the drop so the result reflects the new choice.
+  const setMode = (mode: Mode) => {
+    if (mode === config.mode) return;
+    update({ mode }); setPingKey((k) => k + 1);
+    if (tickets) setSim((s) => restartDrop(s));
+  };
+  const toggleLink = (i: number) => {
+    update({ partitioned: config.partitioned.map((p, j) => (j === i ? !p : p)) });
+    if (tickets) setSim((s) => restartDrop(s));
+  };
   const reset = () => {
     setSim(createSim(configRef.current, SEED)); setBatches([]); setFlashes([]); setFloats([]); setHeal(null); setNarration(null);
   };
   const toggleScenario = () => {
-    const next = { ...configRef.current, windowTicks: config.windowTicks === Infinity ? WINDOW_TICKS : Infinity, partitioned: NONE };
+    const next = { ...configRef.current, windowTicks: tickets ? WINDOW_TICKS : Infinity, partitioned: NONE };
     setConfig(next); setSim(createSim(next, SEED)); setBatches([]); setFloats([]); setHeal(null); setNarration(null);
   };
   const applyPreset = (id: keyof typeof PRESETS) => update(PRESETS[id]);
-  const goTour = (s: number) => { setTour(s); update(TOUR[s].apply); };
+  const goTour = (s: number) => {
+    setTour(s);
+    const apply = TOUR[s].apply;
+    if (apply.windowTicks !== undefined && apply.windowTicks !== configRef.current.windowTicks) {
+      const next = { ...configRef.current, ...apply };
+      setConfig(next); setSim(createSim(next, SEED));
+    } else update(apply);
+  };
+  const closeTour = () => { setTour(null); setAuto(false); };
+
+  // Auto-play advances the tour every TOUR_STEP_MS and closes it after the last step.
+  useEffect(() => {
+    if (tour === null || !auto) return;
+    const id = setTimeout(() => (tour >= TOUR.length - 1 ? closeTour() : goTour(tour + 1)), TOUR_STEP_MS);
+    return () => clearTimeout(id);
+  }, [tour, auto]);
 
   return (
     <div className="min-h-screen bg-zinc-950 font-sans text-zinc-200">
+      {intro && <Intro onClose={closeIntro} onTour={() => { closeIntro(); setAuto(false); goTour(0); }} />}
+      <Spotlight target={tour === null ? null : TOUR[tour].target} />
       <div className="mx-auto flex max-w-[1340px] flex-col gap-2.5 p-4">
-        <Header config={config} running={running} onMode={setMode} onScenario={toggleScenario} onRun={() => setRunning((r) => !r)} onReset={reset} />
-        <TourRow step={tour} onStep={goTour} onClose={() => setTour(null)} />
+        <Header config={config} running={running} onMode={setMode} onScenario={toggleScenario} onRun={() => setRunning((r) => !r)} onReset={reset} onIntro={() => setIntro(true)} />
+        <TourRow step={tour} auto={auto} onStep={goTour} onAuto={setAuto} onClose={closeTour} />
         <div className="grid grid-cols-1 gap-3 min-[1180px]:grid-cols-[minmax(0,1fr)_300px]">
           <div className="flex min-w-[860px] flex-col gap-2.5">
-            <Stage sim={sim} config={config} batches={batches} flashes={flashes} floats={floats} pingKey={pingKey}
-              onToggleLink={(i) => update({ partitioned: config.partitioned.map((p, j) => (j === i ? !p : p)) })} />
-            <div className="flex h-10 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 text-[13px] text-zinc-300">
+            <Stage sim={sim} config={config} batches={batches} flashes={flashes} floats={floats} pingKey={pingKey} onToggleLink={toggleLink} />
+            <div className="flex h-10 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 text-[13px] text-zinc-300" title="What is happening right now, in plain words.">
               <TriangleAlert size={13} className={cls('shrink-0', narration && narration.prio >= 4 ? 'text-rose-400' : narration && narration.prio >= 2 ? 'text-amber-400' : 'text-emerald-400')} />
               <span className="truncate tabular-nums">{narration?.text ?? 'Starting the edge…'}</span>
             </div>
@@ -945,7 +1146,7 @@ export default function CapSimulator() {
             <Chart history={sim.history} config={config} />
           </div>
           <div className="flex flex-col gap-3">
-            <Controls config={config} update={update} onPreset={applyPreset} onSpike={() => setSim((s) => triggerBurst(s))} sim={sim} />
+            <Controls config={config} update={update} onPreset={applyPreset} onSpike={() => setSim((s) => triggerBurst(s))} onNewDrop={() => setSim((s) => restartDrop(s))} sim={sim} />
             <CapBadge config={config} />
           </div>
         </div>

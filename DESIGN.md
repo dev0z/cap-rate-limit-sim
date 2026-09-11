@@ -19,6 +19,9 @@ The stage always shows the ground truth at the store and each node's belief on i
 them is the whole lesson. A second scenario, the ticket sale, uses the same engine with a counter that
 never refills (1000 seats): AP oversells, CP sells exactly 1000, a cut-off CP region sells nothing.
 
+First-time visitors get an intro overlay (the problem, the theorem in plain words, how to read the screen)
+and an eight-step guided tour that applies settings and spotlights the control each step is about.
+
 ## 2. Time and counters
 
 - Tick = 200 ms. Window `W` = 5 ticks (1 s). Limit `L` = 1000.
@@ -97,6 +100,21 @@ accrued during the cut is attributed to it. In CP it fails closed. On heal the e
 (duration, excess admitted, requests failed); the narration turns it into the sentence that makes CAP
 concrete and the stage floats the number up from the node.
 
+## 7a. Ticket drops
+
+The ticket sale runs as repeated drops so every setting can be compared on a fresh 1000-seat inventory:
+
+- Buyers arrive at a tenth of the rate-limit slider (`TICKET_RATE_SCALE`), so 300 on the slider is
+  30 buyers/s per site, 120/s in total, and a drop takes about eight seconds instead of one.
+- A drop closes when the venue is full (`total ≥ L`) and no site has sold for three ticks. That lets AP
+  finish overselling before the result is recorded: sites keep selling until they hear the news.
+- The result (mode, gossip, cut links, seats sold, errors, mean decision latency) goes into a log shown at
+  the bottom of the stage. After a 5 s hold (`DROP_HOLD_TICKS`) the counters clear and the next drop starts.
+- Switching mode, cutting or healing a link, or pressing "New drop" restarts the drop immediately, so the
+  outcome always reflects the current choice. Slider changes wait for the next drop.
+- A cut-off AP site never hears that the venue is full; it sells until its own count plus the last total
+  it heard reaches 1000, which can take most of a minute at 30 buyers/s. The narration says so.
+
 ## 8. Metrics
 
 | Metric | Definition |
@@ -141,6 +159,11 @@ gap between them in rose.
 - 2026-09-11 — Two PRNG streams so arrivals do not change when the mode changes.
 - 2026-09-11 — The steady-state formula stays in the engine and this doc; it is not shown in the UI because
   at 400–600 ms it overestimates by ~15 %.
+- 2026-09-11 — Ticket sale reworked into drops after review: a single sale at 1,200 buyers/s sold out in a
+  second and changing mode afterwards changed nothing. Buyers now arrive at a tenth of the slider, a drop
+  closes when selling stops, results are logged, and mode or link changes restart the drop.
+- 2026-09-11 — Added the intro overlay and the spotlight tour after review: the acronym meant nothing to a
+  first-time visitor and the text-only stepper did not show where to look.
 
 ## 11. Known simplifications
 

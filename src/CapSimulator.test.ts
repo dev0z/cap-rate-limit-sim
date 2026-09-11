@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  BURST, DEFAULT_CONFIG, LIMIT, N, PRESETS, createSim, stepSim,
+  BURST, DEFAULT_CONFIG, LIMIT, N, PRESETS, createSim, restartDrop, stepSim,
   type MetricsSample, type SimConfig,
 } from './CapSimulator';
 
@@ -109,12 +109,20 @@ describe('engine', () => {
     expect(withCut.state.lastReport?.excess).toBeGreaterThan(0);
   });
 
-  it('ticket sale: CP sells exactly the inventory, AP oversells', () => {
+  it('ticket sale runs as drops: CP sells exactly the inventory, AP oversells, then a new drop starts', () => {
     const base = { windowTicks: Infinity, ratePerNode: 300 };
-    const cp = run(4, 100, () => cfg({ ...base, mode: 'cp' })).state;
-    expect(cp.cum.admitted).toBe(LIMIT);
-    const ap = run(4, 100, () => cfg({ ...base, mode: 'ap', gossipMs: 1000 })).state;
-    expect(ap.cum.admitted).toBeGreaterThan(LIMIT);
-    expect(ap.cum.admitted).toBeLessThan(N * LIMIT);
+    const cp = run(4, 300, () => cfg({ ...base, mode: 'cp' })).state;
+    expect(cp.drops.length).toBeGreaterThanOrEqual(2);
+    for (const d of cp.drops) expect(d.sold).toBe(LIMIT);
+    expect(cp.drop.n).toBeGreaterThanOrEqual(cp.drops.length);
+    const ap = run(4, 300, () => cfg({ ...base, mode: 'ap', gossipMs: 1000 })).state;
+    expect(ap.drops.length).toBeGreaterThanOrEqual(1);
+    expect(ap.drops[0].sold).toBeGreaterThan(LIMIT);
+    expect(ap.drops[0].sold).toBeLessThan(N * LIMIT);
+    // Restarting mid-drop clears the counters but keeps the log.
+    const restarted = restartDrop(ap);
+    expect(restarted.nodes.every((n) => n.total === 0)).toBe(true);
+    expect(restarted.drops).toEqual(ap.drops);
+    expect(restarted.drop.n).toBe(ap.drop.n + 1);
   });
 });

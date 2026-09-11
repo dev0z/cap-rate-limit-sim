@@ -15,9 +15,11 @@ Live: _pending deploy_
 3. Switch to **Strong (CP)**. Exactly 1,000, and every decision now costs a round trip to Virginia.
 4. Cut Tokyo's wire in CP: it fails closed and availability drops to 75 %. Cut it in AP: it keeps serving
    blind and the Debt ledger climbs. Heal it to see the bill.
-5. Switch the scenario to **Ticket sale** for the same trade-off with 1,000 seats instead of a rate.
+5. Switch the scenario to **Ticket sale** for the same trade-off with 1,000 seats instead of a rate. Sales
+   run as repeated drops; the log at the bottom of the stage compares how many seats each mode sold.
 
-The 60-second tour walks through the same steps.
+New here? The first visit opens a short intro ("What is CAP?" in the header brings it back), and the
+guided tour spotlights each control while it changes the settings. "Auto-play it" runs the whole tour.
 
 ## Run
 

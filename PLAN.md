@@ -37,15 +37,19 @@ across CDN edge nodes. The audience has never heard of CAP. Within a minute of p
 | 2 | Engine (pure, exported) + 9 invariant tests green | done |
 | 3 | UI: stage, node/store cards, particles, controls, metrics strip, chart, narration | done |
 | 4 | Polish: tour, CAP badge, heal report, static quota UI, ticket sale | done |
-| 5 | Build, `vercel.json`, docs final, push to GitHub, Vercel import, verify live URL | in progress |
+| 5 | Build, `vercel.json`, docs final, push to GitHub | done |
+| 6 | Review round 1: intro overlay, ticket-sale drops, restart on mode/link change, spotlight tour with auto-play | done |
+| 7 | Vercel import, verify live URL | pending |
 
 ## What shipped
 
 Stage with request dots, gossip pulses and CP round trips; belief-vs-truth bars on every node; store card
 with ground truth and the store's own lagging count; cut/heal buttons on each wire and link switches;
 traffic and gossip sliders; three presets and a flash-crowd spike; six-tile metrics strip with the Debt
-ledger; 30 s chart with overshoot fill, latency line and cut/heal/burst markers; one-line narration;
-six-step guided tour; CAP triangle badge; ticket-sale scenario; static-quota mode; reduced-motion fallback.
+ledger and plain-language tooltips; 30 s chart with overshoot fill, latency line and cut/heal/burst/drop
+markers; one-line narration; first-visit intro overlay ("What is CAP?"); eight-step spotlight tour with
+auto-play; CAP triangle badge; ticket-sale scenario run as repeated drops with a result log; static-quota
+mode; reduced-motion fallback.
 
 Not built, by choice: mobile layout (desktop-first, collapses to one column under 1180 px), CP queueing or
 store congestion, node-to-node partitions, the steady-state formula as a UI hint.
