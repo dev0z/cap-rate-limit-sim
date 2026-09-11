@@ -115,6 +115,18 @@ The ticket sale runs as repeated drops so every setting can be compared on a fre
 - A cut-off AP site never hears that the venue is full; it sells until its own count plus the last total
   it heard reaches 1000, which can take most of a minute at 30 buyers/s. The narration says so.
 
+## 7b. Comparison panel, presets, share links
+
+- **Same traffic, three strategies**: three extra copies of the engine step every tick with the same config
+  and the same seed, one per mode, so their arrivals and cut wires are identical. The panel shows each
+  strategy's admitted rate, latency and availability side by side; the active one is highlighted. Hidden
+  in the ticket sale, where the drop log plays that role.
+- **Presets** (per-node rate, gossip, skew, burst, cut links): Calm 150/600; Max traffic 500/600 skew 0.3;
+  Flash crowd 230/600 with ×3 bursts; Fast gossip 500/200; Slow gossip 400/2000; Quiet partition 150/600
+  with Tokyo cut; Partition storm 500/400 with Tokyo cut. Each chip's tooltip says what to watch.
+- **Share links**: mode, rate, gossip, skew, burst, scenario and cut links are mirrored into the query
+  string (`?m=cp&r=400&g=200&cut=3&s=tickets`) and read back on load. The header's share button copies it.
+
 ## 8. Metrics
 
 | Metric | Definition |
@@ -164,6 +176,9 @@ gap between them in rose.
   closes when selling stops, results are logged, and mode or link changes restart the drop.
 - 2026-09-11 — Added the intro overlay and the spotlight tour after review: the acronym meant nothing to a
   first-time visitor and the text-only stepper did not show where to look.
+- 2026-09-11 — Review round 2: seven presets instead of three, a hover explainer on the gossip slider and
+  the Overshoot tile ("why slow gossip breaks the limit"), the three-strategy comparison driven by shadow
+  simulations, and query-string state for shareable links.
 
 ## 11. Known simplifications
 

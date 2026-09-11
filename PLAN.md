@@ -39,7 +39,8 @@ across CDN edge nodes. The audience has never heard of CAP. Within a minute of p
 | 4 | Polish: tour, CAP badge, heal report, static quota UI, ticket sale | done |
 | 5 | Build, `vercel.json`, docs final, push to GitHub | done |
 | 6 | Review round 1: intro overlay, ticket-sale drops, restart on mode/link change, spotlight tour with auto-play | done |
-| 7 | Vercel import, verify live URL | pending |
+| 7 | Review round 2: seven presets with hints, gossip explainer tooltip, three-strategy comparison, share links | done |
+| 8 | Vercel import, verify live URL | pending |
 
 ## What shipped
 
@@ -49,7 +50,9 @@ traffic and gossip sliders; three presets and a flash-crowd spike; six-tile metr
 ledger and plain-language tooltips; 30 s chart with overshoot fill, latency line and cut/heal/burst/drop
 markers; one-line narration; first-visit intro overlay ("What is CAP?"); eight-step spotlight tour with
 auto-play; CAP triangle badge; ticket-sale scenario run as repeated drops with a result log; static-quota
-mode; reduced-motion fallback.
+mode; seven scenario presets with "what to watch" hints; hover explainer for gossip delay; live
+three-strategy comparison on identical traffic; shareable URL state with a copy-link button;
+reduced-motion fallback.
 
 Not built, by choice: mobile layout (desktop-first, collapses to one column under 1180 px), CP queueing or
 store congestion, node-to-node partitions, the steady-state formula as a UI hint.

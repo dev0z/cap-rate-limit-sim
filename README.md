@@ -21,6 +21,11 @@ Live: _pending deploy_
 New here? The first visit opens a short intro ("What is CAP?" in the header brings it back), and the
 guided tour spotlights each control while it changes the settings. "Auto-play it" runs the whole tour.
 
+The Scenarios chips set up seven situations (calm, max traffic, flash crowd, fast and slow gossip, a quiet
+partition, a partition storm); hover a chip for what to watch. The "Same traffic, three strategies" panel
+runs the other two modes on identical traffic so you can compare without switching. Every situation is in
+the URL; the share button copies a link to it, e.g. `?m=cp&r=400&cut=3`.
+
 ## Run
 
 ```bash

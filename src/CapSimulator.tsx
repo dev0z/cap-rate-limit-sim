@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Activity, ChevronLeft, ChevronRight, Clock, Database, Flame, Gauge, Globe, GraduationCap, Info, Link2, Pause, Play,
-  Radio, RotateCcw, Scale, Scissors, Server, ShieldCheck, Ticket, TriangleAlert, Unplug, Waves, X, Zap,
+  Activity, Check, ChevronLeft, ChevronRight, Clock, CloudLightning, Database, Flame, Gauge, Globe, GraduationCap, Hourglass, Info,
+  Link2, Pause, Play, Radio, RotateCcw, Scale, Scissors, Server, Share2, ShieldCheck, Ticket, Timer, TriangleAlert, Unplug, Waves, X, Zap,
 } from 'lucide-react';
 
 // ───────────────────────────── Engine ─────────────────────────────
@@ -71,10 +71,15 @@ export const DEFAULT_CONFIG: SimConfig = {
   skew: 0.2, burst: null, partitioned: NONE,
 };
 export const BURST: BurstSpec = { mult: 3, durationTicks: 20, everyTicks: 60 };
-export const PRESETS: Record<'calm' | 'flash' | 'storm', Partial<SimConfig>> = {
+const CUT_NRT = [false, false, false, true];
+export const PRESETS: Record<'calm' | 'max' | 'flash' | 'fast' | 'slow' | 'quiet' | 'storm', Partial<SimConfig>> = {
   calm: { ratePerNode: 150, gossipMs: 600, skew: 0.15, burst: null, partitioned: NONE },
+  max: { ratePerNode: 500, gossipMs: 600, skew: 0.3, burst: null, partitioned: NONE },
   flash: { ratePerNode: 230, gossipMs: 600, skew: 0.2, burst: BURST, partitioned: NONE },
-  storm: { ratePerNode: 500, gossipMs: 400, skew: 0.3, burst: null, partitioned: [false, false, false, true] },
+  fast: { ratePerNode: 500, gossipMs: 200, skew: 0.2, burst: null, partitioned: NONE },
+  slow: { ratePerNode: 400, gossipMs: 2000, skew: 0.2, burst: null, partitioned: NONE },
+  quiet: { ratePerNode: 150, gossipMs: 600, skew: 0.15, burst: null, partitioned: CUT_NRT },
+  storm: { ratePerNode: 500, gossipMs: 400, skew: 0.3, burst: null, partitioned: CUT_NRT },
 };
 
 const zeros = () => new Array<number>(N).fill(0);
@@ -434,10 +439,101 @@ const TOUR: { title: string; body: string; target: string; apply: Partial<SimCon
 const TOUR_STEP_MS = 9000;
 
 const PRESET_META: { id: keyof typeof PRESETS; label: string; hint: string; Icon: typeof Waves }[] = [
-  { id: 'calm', label: 'Calm', hint: 'Under the limit. Nothing to fight over.', Icon: Waves },
-  { id: 'flash', label: 'Flash crowd', hint: 'Bursts of 3× on one region every 12 s. Watch what each mode lets through.', Icon: Flame },
-  { id: 'storm', label: 'Partition storm', hint: '2,000 req/s and Tokyo cut off. Now pick a mode.', Icon: Unplug },
+  { id: 'calm', label: 'Calm', Icon: Waves, hint: '600 req/s, well under the limit. Every mode says yes; only latency differs.' },
+  { id: 'max', label: 'Max traffic', Icon: Activity, hint: '2,000 req/s, twice the limit, one region hotter than the rest. Eventual admits ~1,500; Strong holds 1,000.' },
+  { id: 'flash', label: 'Flash crowd', Icon: Flame, hint: 'Normal load, then a 3× burst on one region every 12 s. Eventual lets the burst through; Strong caps it.' },
+  { id: 'fast', label: 'Fast gossip', Icon: Timer, hint: '2,000 req/s with gossip every tick. The overshoot shrinks to ~20 % and stays there: that is the floor.' },
+  { id: 'slow', label: 'Slow gossip', Icon: Hourglass, hint: '1,600 req/s with gossip every 2 s. Views are older than the 1 s window, so the limiter is effectively off.' },
+  { id: 'quiet', label: 'Quiet partition', Icon: Unplug, hint: "Low traffic and Tokyo cut off. Eventual loses nothing; Strong still turns Tokyo's users away." },
+  { id: 'storm', label: 'Partition storm', Icon: CloudLightning, hint: '2,000 req/s and Tokyo cut off. Eventual admits ~1,750; Strong holds 1,000 at 75 % availability.' },
 ];
+
+// Query-string state so a situation can be shared as a link. Only non-default values are written.
+function configFromUrl(): SimConfig {
+  const c: SimConfig = { ...DEFAULT_CONFIG };
+  try {
+    const q = new URLSearchParams(location.search);
+    const m = q.get('m');
+    if (m === 'ap' || m === 'cp' || m === 'static') c.mode = m;
+    if (q.has('r')) c.ratePerNode = Math.min(500, Math.max(0, Math.round(Number(q.get('r')) / 10) * 10)) || 0;
+    if (q.has('g')) c.gossipMs = Math.min(2000, Math.max(200, Math.round(Number(q.get('g')) / 200) * 200)) || 200;
+    if (q.has('k')) c.skew = Math.min(0.6, Math.max(0, Number(q.get('k')))) || 0;
+    if (q.get('b') === '1') c.burst = BURST;
+    if (q.get('s') === 'tickets') c.windowTicks = Infinity;
+    const cut = q.get('cut');
+    if (cut !== null) c.partitioned = NONE.map((_, i) => cut.split(',').includes(String(i)));
+  } catch { /* no URL access */ }
+  return c;
+}
+function urlFor(c: SimConfig): string {
+  const q = new URLSearchParams();
+  if (c.mode !== 'ap') q.set('m', c.mode);
+  if (c.ratePerNode !== DEFAULT_CONFIG.ratePerNode) q.set('r', String(c.ratePerNode));
+  if (c.gossipMs !== DEFAULT_CONFIG.gossipMs) q.set('g', String(c.gossipMs));
+  if (c.skew !== DEFAULT_CONFIG.skew) q.set('k', String(c.skew));
+  if (c.burst) q.set('b', '1');
+  if (c.windowTicks === Infinity) q.set('s', 'tickets');
+  const cut = c.partitioned.flatMap((p, i) => (p ? [i] : []));
+  if (cut.length) q.set('cut', cut.join(','));
+  const s = q.toString();
+  return s ? `?${s}` : location.pathname;
+}
+
+// Small hover explainer: an info icon that opens a popover.
+function Hint({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <span className="group/hint relative inline-flex align-middle">
+      <Info size={11} className="cursor-help text-zinc-500 group-hover/hint:text-emerald-400" />
+      <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-2 hidden w-72 -translate-x-1/2 rounded-md border border-zinc-700 bg-zinc-950 p-3 text-left text-[11px] font-normal normal-case leading-snug tracking-normal text-zinc-300 shadow-2xl group-hover/hint:block">
+        <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-emerald-400">{title}</span>
+        {children}
+      </span>
+    </span>
+  );
+}
+
+function GossipHint() {
+  return (
+    <Hint title="Why slow gossip breaks the limit">
+      Each edge says yes while <span className="text-zinc-100">its own count + the last totals it heard</span> stays under 1,000. What it heard is up to two gossip intervals old, and counts older than the 1 s window have already expired from its view. So it believes the others are quiet and keeps admitting.
+      <span className="mt-2 block space-y-1 font-mono text-[10px]">
+        <span className="flex items-center gap-2"><span className="w-14 text-zinc-500">believes</span><span className="h-1.5 rounded-full bg-sky-500/70" style={{ width: '38%' }} /><span className="text-sky-300">620</span></span>
+        <span className="flex items-center gap-2"><span className="w-14 text-zinc-500">truth</span><span className="flex h-1.5 rounded-full" style={{ width: '72%' }}><span className="h-full rounded-l-full bg-sky-500/70" style={{ width: '53%' }} /><span className="h-full rounded-r-full bg-rose-500/70" style={{ width: '47%' }} /></span><span className="text-rose-300">1,180</span></span>
+      </span>
+      <span className="mt-2 block font-mono text-[10px] text-zinc-400">overshoot ≈ other edges' rate × staleness</span>
+      <span className="mt-1 block">Faster gossip shrinks the gap but never closes it. Only asking the store first (Strong) removes it, and that costs a round trip per request.</span>
+    </Hint>
+  );
+}
+
+// Live comparison: the other two strategies run on the same arrivals in the background.
+function Compare({ shadows, config }: { shadows: Record<Mode, SimState>; config: SimConfig }) {
+  const L = config.limit;
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3" title="Three copies of the simulation run on identical traffic and cut wires; only the decision rule differs.">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500">Same traffic, three strategies</div>
+      <div className="mt-1.5 flex flex-col gap-1">
+        {MODES.map(({ id, label, accent, Icon }) => {
+          const h = shadows[id].history;
+          const s = h[h.length - 1];
+          const adm = s?.truthWindow ?? 0, over = Math.max(0, adm - L), lat = s?.latencyMs ?? 0, avail = (s?.availability ?? 1) * 100;
+          const refused = h.slice(-WINDOW_TICKS).reduce((a, x) => a + x.rejected, 0);
+          const wasted = id === 'static' && adm < 0.97 * L && refused > 0;
+          const active = config.mode === id;
+          return (
+            <div key={id} className={cls('grid grid-cols-[14px_72px_1fr_auto] items-center gap-2 rounded-md px-2 py-1 font-mono text-[11px] tabular-nums', active ? 'bg-zinc-800/80 ring-1 ring-zinc-700' : '')}>
+              <Icon size={12} className={ACCENT[accent].text} />
+              <span className="font-sans text-[11px] text-zinc-300">{label.replace(/ \(.*\)$/, '')}</span>
+              <span className={adm > L ? 'text-rose-400' : 'text-emerald-400'}>{fmt(adm)}{over > 0 && <span className="text-rose-400/80"> +{fmt(over)}</span>}</span>
+              <span className="text-zinc-500">{wasted ? <span className="text-violet-300">{fmt(refused)} refused</span> : lat < 5 ? '~1 ms' : `${fmt(lat)} ms`}{avail < 99.5 && <span className="text-rose-400"> · {avail.toFixed(0)} %</span>}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-1 text-[10px] text-zinc-500">Admitted req/s · latency · availability when below 100 %.</div>
+    </div>
+  );
+}
 
 function narrate(last: MetricsSample, config: SimConfig, sim: SimState, heal: { report: PartitionReport; untilTick: number } | null): Omit<Narration, 'since'> {
   const L = config.limit;
@@ -461,7 +557,9 @@ function narrate(last: MetricsSample, config: SimConfig, sim: SimState, heal: { 
     if (config.mode === 'cp')
       return { key: `cut-cp-${i}`, prio: 4, text: tickets
         ? `${code(i)} can't reach the store, so it sells nothing: ${fmt(n.failed * 5)} buyers/s get errors. The seat count stays exact.`
-        : `${code(i)} can't reach the store, so it refuses everyone: ${fmt(n.failed * 5)} errors/s. The global count stays exact.` };
+        : last.offeredWindow < 0.8 * L
+          ? `${code(i)} can't reach the store, so it refuses everyone: ${fmt(n.failed * 5)} errors/s — even though there is room for all of them.`
+          : `${code(i)} can't reach the store, so it refuses everyone: ${fmt(n.failed * 5)} errors/s. The global count stays exact.` };
     if (config.mode === 'static')
       return { key: `cut-st-${i}`, prio: 4, text: `${code(i)} is cut off and doesn't care: a fixed 250 req/s quota needs no one. Exact, until traffic moves.` };
     const excess = Math.max(0, Math.round(last.debt - sim.debtAtCut[i]));
@@ -511,6 +609,10 @@ function Header({ config, running, onMode, onScenario, onRun, onReset, onIntro }
   config: SimConfig; running: boolean; onMode: (m: Mode) => void; onScenario: () => void; onRun: () => void; onReset: () => void; onIntro: () => void;
 }) {
   const tickets = config.windowTicks === Infinity;
+  const [copied, setCopied] = useState(false);
+  const share = () => {
+    navigator.clipboard?.writeText(location.href).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => undefined);
+  };
   return (
     <header className="flex h-12 items-center gap-4">
       <div className="flex items-center gap-2">
@@ -551,6 +653,9 @@ function Header({ config, running, onMode, onScenario, onRun, onReset, onIntro }
         </button>
         <button onClick={onReset} className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:border-zinc-600" title="Reset counters and debt">
           <RotateCcw size={14} />
+        </button>
+        <button onClick={share} className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:border-zinc-600" title="Copy a link to this exact situation">
+          {copied ? <Check size={14} className="text-emerald-400" /> : <Share2 size={14} />}
         </button>
       </div>
     </header>
@@ -836,10 +941,10 @@ function Stage({ sim, config, batches, flashes, floats, pingKey, onToggleLink }:
   );
 }
 
-function Tile({ label, value, sub, tone, pop, hint, tour }: { label: string; value: string; sub: string; tone: string; pop?: number; hint: string; tour?: string }) {
+function Tile({ label, value, sub, tone, pop, hint, tour, extra }: { label: string; value: string; sub: string; tone: string; pop?: number; hint: string; tour?: string; extra?: ReactNode }) {
   return (
     <div data-tour={tour} title={hint} className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-zinc-500">{label}{extra}</div>
       <div key={pop} className={cls('font-mono text-2xl font-semibold tabular-nums leading-tight', tone)} style={pop ? { animation: 'pop 200ms ease-out' } : undefined}>{value}</div>
       <div className="truncate text-[11px] text-zinc-500">{sub}</div>
     </div>
@@ -864,7 +969,7 @@ function Metrics({ history, config }: { history: MetricsSample[]; config: SimCon
       <Tile label={tickets ? 'Sold (truth)' : 'Admitted (truth)'} value={fmt(admitted)} sub={admitted > L ? 'OVER THE LIMIT' : `${fmt(rejected)} rejected /s`} tone={admitted > L ? 'text-rose-400' : 'text-emerald-400'}
         hint={tickets ? 'Seats actually sold in this drop, all sites combined.' : 'What actually got through in the last second, all edges combined. This is the ground truth, not what any node believes.'} />
       <Tile label="Overshoot" value={over > 0 ? `+${fmt(over)}` : '0'} sub={tickets ? 'seats oversold' : 'req/s over limit'} tone={over > 0 ? 'text-rose-400' : 'text-zinc-500'}
-        hint="How far the real total is above the 1,000 limit right now. Anything above zero is a broken promise." />
+        hint="How far the real total is above the 1,000 limit right now. Anything above zero is a broken promise." extra={<GossipHint />} />
       <Tile label="Debt" value={fmt(debt)} sub={under > 0 ? `${fmt(under)} turned away needlessly` : 'over the limit, in this mode'} tone={debt > 0 ? 'text-rose-400' : 'text-zinc-500'} pop={Math.floor(debt / 50)} tour="debt"
         hint="Requests admitted beyond the limit since you chose this mode, measured against a perfect limiter on the same traffic. The sub-line counts requests refused while there was still room." />
       <Tile label="Availability" value={`${avail.toFixed(1)}%`} sub="requests that got an answer" tone={avail >= 99.5 ? 'text-emerald-400' : avail >= 90 ? 'text-amber-400' : 'text-rose-400'}
@@ -933,7 +1038,7 @@ function Controls({ config, update, onPreset, onSpike, onNewDrop, sim }: {
   const rate = tickets ? config.ratePerNode * TICKET_RATE_SCALE : config.ratePerNode;
   const section = 'text-[10px] uppercase tracking-wider text-zinc-500';
   return (
-    <div className="flex flex-col gap-4 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
+    <div className="flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
       <div data-tour="traffic" title="Mean arrivals per node. Traffic is random around this value and one region is always a little hotter than the others.">
         <div className="flex items-baseline justify-between">
           <span className={section}>Traffic</span>
@@ -948,7 +1053,7 @@ function Controls({ config, update, onPreset, onSpike, onNewDrop, sim }: {
           <span className={section}>Sync</span>
           <span className="font-mono text-[13px] tabular-nums text-zinc-100">{config.gossipMs} <span className="text-zinc-500">ms</span></span>
         </div>
-        <div className="text-[11px] text-zinc-400">Gossip interval</div>
+        <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">Gossip interval <GossipHint /></div>
         <input type="range" min={200} max={2000} step={200} value={config.gossipMs} disabled={cp || config.mode === 'static'} onChange={(e) => update({ gossipMs: +e.target.value })} className={cls('mt-1 w-full', slider)} />
         <div className="flex justify-between font-mono text-[10px] text-zinc-600"><span>every tick</span><span>1 s = window</span><span>2 s</span></div>
         <div className="text-[11px] text-zinc-500">
@@ -978,13 +1083,15 @@ function Controls({ config, update, onPreset, onSpike, onNewDrop, sim }: {
         </div>
       </div>
       <div>
-        <div className={section}>Scenarios</div>
-        <div className="mt-1 flex flex-wrap gap-1.5">
+        <div className={section}>Scenarios <span className="normal-case tracking-normal text-zinc-600">· hover for what to watch</span></div>
+        <div className="mt-1 grid grid-cols-2 gap-1.5">
           {PRESET_META.map(({ id, label, hint, Icon }) => (
-            <button key={id} onClick={() => onPreset(id)} title={hint} className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[12px] text-zinc-200 hover:border-zinc-500">
-              <Icon size={12} className="text-zinc-400" /> {label}
+            <button key={id} onClick={() => onPreset(id)} title={hint} className="flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-left text-[12px] text-zinc-200 hover:border-zinc-500">
+              <Icon size={12} className="shrink-0 text-zinc-400" /> {label}
             </button>
           ))}
+        </div>
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
           <button onClick={onSpike} title="A 3× flash crowd on a random node for 4 s" className="flex items-center gap-1.5 rounded-md border border-orange-500/40 bg-zinc-900 px-2 py-1 text-[12px] text-orange-300 hover:border-orange-400">
             <Zap size={12} /> Spike a node
           </button>
@@ -1018,7 +1125,7 @@ function CapBadge({ config }: { config: SimConfig }) {
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
       <div className="text-[10px] uppercase tracking-wider text-zinc-500">The trade-off you are making</div>
       <div className="mt-1 flex items-center gap-3">
-        <svg viewBox="0 0 160 140" className="h-[110px] w-[126px] shrink-0">
+        <svg viewBox="0 0 160 140" className="h-[92px] w-[105px] shrink-0">
           <polygon points={`${C.x},${C.y} ${A.x},${A.y} ${P.x},${P.y}`} fill="none" strokeWidth={1.5} className="stroke-zinc-700" />
           <line x1={edge[0].x} y1={edge[0].y} x2={edge[1].x} y2={edge[1].y} stroke={hex} strokeWidth={4} strokeDasharray={config.mode === 'static' ? '4 4' : undefined} />
           {dot('C', C, 'Consistency — every node sees the same count at the same time.')}
@@ -1029,18 +1136,22 @@ function CapBadge({ config }: { config: SimConfig }) {
         <div className="text-[12px] leading-snug text-zinc-300">
           <div className="font-medium text-zinc-100">{meta.label}</div>
           <div className="mt-1">{caption}</div>
-          <div className="mt-1 text-[11px] text-zinc-500">P is not optional: networks fail. The choice is what to do while they are failing.</div>
+          <div className="mt-1 text-[11px] text-zinc-500">P is not optional: networks fail. The choice is what to do meanwhile.</div>
         </div>
       </div>
     </div>
   );
 }
 
+const shadowsFor = (c: SimConfig): Record<Mode, SimState> =>
+  ({ ap: createSim({ ...c, mode: 'ap' }, SEED), cp: createSim({ ...c, mode: 'cp' }, SEED), static: createSim({ ...c, mode: 'static' }, SEED) });
+
 export default function CapSimulator() {
-  const [config, setConfig] = useState<SimConfig>(DEFAULT_CONFIG);
+  const [config, setConfig] = useState<SimConfig>(configFromUrl);
   const configRef = useRef(config);
   configRef.current = config;
-  const [sim, setSim] = useState(() => createSim(DEFAULT_CONFIG, SEED));
+  const [sim, setSim] = useState(() => createSim(config, SEED));
+  const [shadows, setShadows] = useState(() => shadowsFor(config));
   const [running, setRunning] = useState(true);
   const [tour, setTour] = useState<number | null>(null);
   const [auto, setAuto] = useState(false);
@@ -1056,9 +1167,20 @@ export default function CapSimulator() {
   // The 200 ms tick. Sliders write configRef, so they never restart the interval.
   useEffect(() => {
     if (!running) return;
-    const id = setInterval(() => setSim((s) => stepSim(s, configRef.current)), TICK_MS);
+    const id = setInterval(() => {
+      const c = configRef.current;
+      setSim((s) => stepSim(s, c));
+      // The comparison panel only exists for the rate limiter; ticket drops are compared through the drop log.
+      if (c.windowTicks !== Infinity)
+        setShadows((sh) => ({ ap: stepSim(sh.ap, { ...c, mode: 'ap' }), cp: stepSim(sh.cp, { ...c, mode: 'cp' }), static: stepSim(sh.static, { ...c, mode: 'static' }) }));
+    }, TICK_MS);
     return () => clearInterval(id);
   }, [running]);
+
+  // Keep the address bar in sync so any situation can be shared as a link.
+  useEffect(() => {
+    try { history.replaceState(null, '', urlFor(config)); } catch { /* sandboxed */ }
+  }, [config]);
 
   // Per-tick animation batches and narration, derived from the latest sample and events.
   useEffect(() => {
@@ -1104,11 +1226,13 @@ export default function CapSimulator() {
     if (tickets) setSim((s) => restartDrop(s));
   };
   const reset = () => {
-    setSim(createSim(configRef.current, SEED)); setBatches([]); setFlashes([]); setFloats([]); setHeal(null); setNarration(null);
+    setSim(createSim(configRef.current, SEED)); setShadows(shadowsFor(configRef.current));
+    setBatches([]); setFlashes([]); setFloats([]); setHeal(null); setNarration(null);
   };
   const toggleScenario = () => {
     const next = { ...configRef.current, windowTicks: tickets ? WINDOW_TICKS : Infinity, partitioned: NONE };
-    setConfig(next); setSim(createSim(next, SEED)); setBatches([]); setFloats([]); setHeal(null); setNarration(null);
+    setConfig(next); setSim(createSim(next, SEED)); setShadows(shadowsFor(next));
+    setBatches([]); setFloats([]); setHeal(null); setNarration(null);
   };
   const applyPreset = (id: keyof typeof PRESETS) => update(PRESETS[id]);
   const goTour = (s: number) => {
@@ -1116,7 +1240,7 @@ export default function CapSimulator() {
     const apply = TOUR[s].apply;
     if (apply.windowTicks !== undefined && apply.windowTicks !== configRef.current.windowTicks) {
       const next = { ...configRef.current, ...apply };
-      setConfig(next); setSim(createSim(next, SEED));
+      setConfig(next); setSim(createSim(next, SEED)); setShadows(shadowsFor(next));
     } else update(apply);
   };
   const closeTour = () => { setTour(null); setAuto(false); };
@@ -1147,6 +1271,7 @@ export default function CapSimulator() {
           </div>
           <div className="flex flex-col gap-3">
             <Controls config={config} update={update} onPreset={applyPreset} onSpike={() => setSim((s) => triggerBurst(s))} onNewDrop={() => setSim((s) => restartDrop(s))} sim={sim} />
+            {!tickets && <Compare shadows={shadows} config={config} />}
             <CapBadge config={config} />
           </div>
         </div>
