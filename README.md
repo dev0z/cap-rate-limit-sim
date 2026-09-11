@@ -5,7 +5,7 @@ rate limit across many edge nodes. Four edge servers, one central store, a 200 m
 Switch between eventual and strong consistency, tune the gossip interval, cut a link, and watch what the
 system gets wrong or refuses to do.
 
-Live: _pending deploy_
+Live: https://cap-rate-limit-sim-1.vercel.app/
 
 ## What to try
 

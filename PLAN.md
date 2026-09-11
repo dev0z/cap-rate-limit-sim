@@ -40,7 +40,7 @@ across CDN edge nodes. The audience has never heard of CAP. Within a minute of p
 | 5 | Build, `vercel.json`, docs final, push to GitHub | done |
 | 6 | Review round 1: intro overlay, ticket-sale drops, restart on mode/link change, spotlight tour with auto-play | done |
 | 7 | Review round 2: seven presets with hints, gossip explainer tooltip, three-strategy comparison, share links | done |
-| 8 | Vercel import, verify live URL | pending |
+| 8 | Vercel import, verify live URL (https://cap-rate-limit-sim-1.vercel.app/, headers and shared link checked) | done |
 
 ## What shipped
 
