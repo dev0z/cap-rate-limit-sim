@@ -1027,8 +1027,9 @@ function Chart({ history, config }: { history: MetricsSample[]; config: SimConfi
   );
 }
 
-function Controls({ config, update, onPreset, onSpike, onNewDrop, sim }: {
-  config: SimConfig; update: (p: Partial<SimConfig>) => void; onPreset: (id: keyof typeof PRESETS) => void; onSpike: () => void; onNewDrop: () => void; sim: SimState;
+function Controls({ config, update, onPreset, onSpike, onNewDrop, onToggleLink, sim }: {
+  config: SimConfig; update: (p: Partial<SimConfig>) => void; onPreset: (id: keyof typeof PRESETS) => void; onSpike: () => void;
+  onNewDrop: () => void; onToggleLink: (i: number) => void; sim: SimState;
 }) {
   const meta = modeMeta(config.mode);
   const slider = ACCENT[meta.accent].slider;
@@ -1045,7 +1046,7 @@ function Controls({ config, update, onPreset, onSpike, onNewDrop, sim }: {
           <span className="font-mono text-[13px] tabular-nums text-zinc-100">{fmt(rate)} <span className="text-zinc-500">{tickets ? 'buyers/s' : 'req/s'}</span></span>
         </div>
         <div className="text-[11px] text-zinc-400">{tickets ? 'Buyers per site' : 'Incoming per node'}</div>
-        <input type="range" min={0} max={500} step={10} value={config.ratePerNode} onChange={(e) => update({ ratePerNode: +e.target.value })} className={cls('mt-1 w-full', slider)} />
+        <input type="range" min={0} max={500} step={10} value={config.ratePerNode} onChange={(e) => update({ ratePerNode: +e.target.value })} className={cls('mt-1 w-full', slider)} aria-label="Incoming traffic per node" />
         <div className="font-mono text-[11px] text-zinc-500">≈ {fmt(rate * N)} total · {tickets ? `${fmt(config.limit)} seats per drop` : `limit ${fmt(config.limit)} req/s`}</div>
       </div>
       <div data-tour="gossip" title="How often each edge exchanges counters with the store in Eventual mode. Longer means a staler view." className={cp || config.mode === 'static' ? 'opacity-50' : ''}>
@@ -1054,7 +1055,7 @@ function Controls({ config, update, onPreset, onSpike, onNewDrop, sim }: {
           <span className="font-mono text-[13px] tabular-nums text-zinc-100">{config.gossipMs} <span className="text-zinc-500">ms</span></span>
         </div>
         <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">Gossip interval <GossipHint /></div>
-        <input type="range" min={200} max={2000} step={200} value={config.gossipMs} disabled={cp || config.mode === 'static'} onChange={(e) => update({ gossipMs: +e.target.value })} className={cls('mt-1 w-full', slider)} />
+        <input type="range" min={200} max={2000} step={200} value={config.gossipMs} disabled={cp || config.mode === 'static'} onChange={(e) => update({ gossipMs: +e.target.value })} className={cls('mt-1 w-full', slider)} aria-label="Gossip interval in milliseconds" />
         <div className="flex justify-between font-mono text-[10px] text-zinc-600"><span>every tick</span><span>1 s = window</span><span>2 s</span></div>
         <div className="text-[11px] text-zinc-500">
           {cp ? 'unused — every request asks the store' : config.mode === 'static' ? 'unused — nothing to sync' : blind ? 'blind: a view older than the window counts for nothing' : "how stale a node's view may get"}
@@ -1068,7 +1069,7 @@ function Controls({ config, update, onPreset, onSpike, onNewDrop, sim }: {
             const since = sim.partitionSince[i];
             return (
               <label key={n.code} className="flex cursor-pointer items-center gap-2 text-[12px]">
-                <button role="switch" aria-checked={!cut} onClick={() => update({ partitioned: config.partitioned.map((p, j) => (j === i ? !p : p)) })}
+                <button role="switch" aria-checked={!cut} aria-label={`${n.city} link to the store`} onClick={() => onToggleLink(i)}
                   className={cls('relative h-4 w-7 rounded-full transition-colors', cut ? 'bg-rose-500/70' : 'bg-emerald-500/70')}>
                   <span className={cls('absolute top-0.5 h-3 w-3 rounded-full bg-zinc-950 transition-transform', cut ? 'translate-x-0.5' : 'translate-x-3.5')} />
                 </button>
@@ -1270,7 +1271,7 @@ export default function CapSimulator() {
             <Chart history={sim.history} config={config} />
           </div>
           <div className="flex flex-col gap-3">
-            <Controls config={config} update={update} onPreset={applyPreset} onSpike={() => setSim((s) => triggerBurst(s))} onNewDrop={() => setSim((s) => restartDrop(s))} sim={sim} />
+            <Controls config={config} update={update} onPreset={applyPreset} onSpike={() => setSim((s) => triggerBurst(s))} onNewDrop={() => setSim((s) => restartDrop(s))} onToggleLink={toggleLink} sim={sim} />
             {!tickets && <Compare shadows={shadows} config={config} />}
             <CapBadge config={config} />
           </div>

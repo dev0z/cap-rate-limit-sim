@@ -46,7 +46,7 @@ across CDN edge nodes. The audience has never heard of CAP. Within a minute of p
 
 Stage with request dots, gossip pulses and CP round trips; belief-vs-truth bars on every node; store card
 with ground truth and the store's own lagging count; cut/heal buttons on each wire and link switches;
-traffic and gossip sliders; three presets and a flash-crowd spike; six-tile metrics strip with the Debt
+traffic and gossip sliders; a flash-crowd spike; six-tile metrics strip with the Debt
 ledger and plain-language tooltips; 30 s chart with overshoot fill, latency line and cut/heal/burst/drop
 markers; one-line narration; first-visit intro overlay ("What is CAP?"); eight-step spotlight tour with
 auto-play; CAP triangle badge; ticket-sale scenario run as repeated drops with a result log; static-quota

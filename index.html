@@ -4,7 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#09090b" />
     <title>CAP in Practice — Distributed Rate Limiting</title>
+    <meta name="description" content="A live simulation of the CAP theorem: four CDN edge servers enforcing one global rate limit. Switch between eventual and strong consistency, tune gossip, cut a link, and watch the promise break or hold." />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="CAP in Practice — Distributed Rate Limiting" />
+    <meta property="og:description" content="Four edge servers, one global limit, one truth. An interactive simulation of what CAP means when the network breaks." />
+    <meta property="og:url" content="https://cap-rate-limit-sim-1.vercel.app/" />
+    <meta name="twitter:card" content="summary" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2309090b'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%2334d399'/%3E%3Ccircle cx='7' cy='7' r='3' fill='%2338bdf8'/%3E%3Ccircle cx='25' cy='7' r='3' fill='%2338bdf8'/%3E%3Ccircle cx='7' cy='25' r='3' fill='%2338bdf8'/%3E%3Ccircle cx='25' cy='25' r='3' fill='%23f43f5e'/%3E%3Cpath d='M9.5 9.5 13 13M22.5 9.5 19 13M9.5 22.5 13 19' stroke='%2352525b' stroke-width='1.5'/%3E%3Cpath d='M22.5 22.5 19 19' stroke='%23f43f5e' stroke-width='1.5' stroke-dasharray='1.5 1.5'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
